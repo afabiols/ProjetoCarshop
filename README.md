@@ -18,7 +18,7 @@ O sistema segue a arquitetura em \*\*3 camadas\*\*: \*\*Front-end (HTML, CSS, JS
 
 \- Antonio Fabio Lima Silva
 
-
+ RA: 2302656
 
 ---
 
@@ -26,7 +26,8 @@ O sistema segue a arquitetura em \*\*3 camadas\*\*: \*\*Front-end (HTML, CSS, JS
 
 \## ⚙️ Funcionalidades Entregues
 
-
+\-### URL Aplicação
+\- http://127.0.0.1:8000/
 
 \### Fase 1 — Cadastro de Carros
 
