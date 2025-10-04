@@ -1,115 +1,185 @@
-\# Projeto CarShop • Impacta
+👥 Integrantes
 
+Antonio Fabio Lima Silva
+RA: 2302656
 
+⚙️ Funcionalidades Entregues
+URL da Aplicação
 
-Sistema simples para \*\*cadastro, edição e listagem de carros\*\* (compra e estoque), desenvolvido como parte da disciplina \*\*Projeto de Software\*\*.  
+http://127.0.0.1:8000/
 
-O sistema segue a arquitetura em \*\*3 camadas\*\*: \*\*Front-end (HTML, CSS, JS)\*\*, \*\*Back-end (Python FastAPI)\*\* e \*\*Banco de Dados (PostgreSQL)\*\*.
+Dashboard
 
+Tela inicial com botões para Carros, Clientes, Vendas (placeholder) e Vendedores (placeholder).
 
+Fase 1 — Cadastro de Carros
 
----
+Formulário com 8 campos (marca, modelo, ano, cor, km, preço, quantidade, status).
 
+Validação no front (JavaScript) e back (FastAPI).
 
+Salvar, listar com filtro por marca, editar e excluir.
 
-\## 👥 Integrantes
+Fase 2 — Cadastro de Clientes
 
+Formulário simples (nome, CPF, data de nascimento).
 
+CPF salvo apenas com dígitos (11) e unicidade garantida.
 
-\- Antonio Fabio Lima Silva
+Listar com filtro por nome e/ou CPF, editar e excluir.
 
- RA: 2302656
+(Próximas fases: Vendas e Vendedores.)
 
----
+💻 Tecnologias
 
+Frontend: HTML5, CSS3, JavaScript
 
+Backend: Python 3.11+ com FastAPI
 
-\## ⚙️ Funcionalidades Entregues
+Banco de Dados: PostgreSQL (auto-setup de database e schema)
 
-\-### URL Aplicação
-\- http://127.0.0.1:8000/
+ORM: SQLAlchemy
 
-\### Fase 1 — Cadastro de Carros
+📦 Pré-requisitos
 
-\- Formulário com 8 campos (marca, modelo, ano, cor, km, preço, quantidade, status).
+Python 3.11+
 
-\- Validação de dados no front (JavaScript) e no back (FastAPI).
+PostgreSQL rodando em localhost:5432
 
-\- Salvar novos carros no banco de dados.
+Usuário postgres (ajuste via DATABASE_URL se usar senha/usuário diferente)
 
-\- Listagem em tabela, com filtro por marca.
+Dependências Python
 
-\- Ações de editar e excluir carros.
+As bibliotecas são instaladas automaticamente na primeira execução, mas você pode usar requirements.txt:
 
+fastapi
+uvicorn[standard]
+sqlalchemy
+pydantic
+psycopg2-binary
 
+▶️ Como rodar o projeto
+1) Clonar o repositório
+git clone https://github.com/afabiols/ProjetoCarshop.git
+cd ProjetoCarshop
 
-\*(Nas próximas fases novas funcionalidades serão adicionadas.)\*
+2) (Opcional) Criar e ativar a venv
 
+Windows (PowerShell):
 
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
 
----
 
+Linux/macOS:
 
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 
-\## 💻 Tecnologias
 
+Se não usar requirements.txt, o app faz auto-instalação na primeira execução.
 
+3) Configurar variáveis (opcional)
 
-\- \*\*Frontend:\*\* HTML5, CSS3, JavaScript
+Crie um arquivo .env (ou exporte no ambiente) se quiser sobrescrever os padrões:
 
-\- \*\*Backend:\*\* Python 3.11+ com FastAPI
+DATABASE_URL=postgresql+psycopg2://postgres@localhost:5432/carshop
+DB_SCHEMA=carshop
 
-\- \*\*Banco de Dados:\*\* PostgreSQL (schema e tabela criados automaticamente)
 
-\- \*\*ORM:\*\* SQLAlchemy
+O app cria o database e o schema automaticamente se não existirem.
 
+4) Executar
 
+Opção A (uvicorn):
 
----
+uvicorn app:app --reload
 
 
+Opção B (python):
 
-\## 📦 Pré-requisitos
+python app.py
 
 
+Acesse:
 
-\- Python 3.11+ instalado
+Dashboard: http://127.0.0.1:8000/
 
-\- PostgreSQL instalado e rodando em `localhost:5432`
+Carros: http://127.0.0.1:8000/cars
 
-\- Usuário `postgres` (sem senha por padrão, mas pode configurar senha via `DATABASE\_URL`)
+Clientes: http://127.0.0.1:8000/clients
 
+Vendas (placeholder): http://127.0.0.1:8000/sales
 
+Vendedores (placeholder): http://127.0.0.1:8000/sellers
 
-\### Dependências Python
+🔐 Variáveis de Ambiente
 
-As bibliotecas necessárias são instaladas automaticamente na primeira execução:
+DATABASE_URL — Ex.: postgresql+psycopg2://postgres@localhost:5432/carshop
 
-\- fastapi
+DB_SCHEMA — Ex.: carshop (default)
 
-\- uvicorn\[standard]
+Importante: não commitar .env. Mantenha .env no .gitignore.
 
-\- sqlalchemy
+🔗 Endpoints (API)
+Carros
 
-\- psycopg2-binary
+GET /api/cars?brand=Toyota — lista (filtro opcional por marca)
 
+POST /api/cars — cria (form fields: brand, model, year, color, mileage_km, price, quantity, status)
 
+PUT /api/cars/{id} — atualiza
 
----
+DELETE /api/cars/{id} — remove
 
+Clientes
 
+GET /api/clients?nome=Maria&cpf=12345678901 — lista (filtros opcionais)
 
-\## ▶️ Como rodar o projeto
+POST /api/clients — cria (form fields: nome, cpf(11 dígitos), data_nascimento (YYYY-MM-DD))
 
+PUT /api/clients/{id} — atualiza
 
+DELETE /api/clients/{id} — remove
 
-1\. Clone o repositório:
+🗂️ Estrutura do Projeto
+ProjetoCarshop/
+├─ app.py                # monolito FastAPI + HTML/CSS/JS embutidos
+├─ requirements.txt      # dependências (opcional)
+├─ .gitignore            # ignora venv/.env/artefatos
+├─ .gitattributes        # normalização de EOL
+└─ README.md             # este arquivo
 
-&nbsp;  ```bash
+🧪 Teste rápido de conexão (PostgreSQL)
 
-&nbsp;  git clone https://github.com/afabiols/ProjetoCarshop.git
+Se tiver erro de conexão:
 
-&nbsp;  cd ProjetoCarshop
+Verifique se o serviço PostgreSQL está ativo.
 
+Teste credenciais com psql/DBeaver.
 
+Confira DATABASE_URL (usuário, senha, host, porta e database).
 
+Exemplo com senha:
+
+DATABASE_URL=postgresql+psycopg2://postgres:MINHA_SENHA@localhost:5432/carshop
+
+❗ Troubleshooting
+
+psycopg2-binary falhou ao instalar:
+Atualize pip/setuptools: python -m pip install --upgrade pip setuptools wheel
+
+Permissão negada ao criar database:
+Rode o servidor com um usuário PostgreSQL com permissão para CREATE DATABASE ou crie o DB manualmente.
+
+Porta 8000 ocupada:
+Rode em outra porta: uvicorn app:app --reload --port 8001
+
+CPF inválido:
+O backend exige 11 dígitos. Remova máscara/pontos/traços.
+
+📝 Licença
+
+MIT — sinta-se à vontade para usar e adaptar.
