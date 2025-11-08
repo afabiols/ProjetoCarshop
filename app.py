@@ -3,13 +3,20 @@
 # Auto-setup:
 # 1) cria o DATABASE se não existir;
 # 2) cria o SCHEMA (padrão: carshop) se não existir;
-# 3) cria as TABELAS (cars, clients) no schema se não existir.
+# 3) cria as TABELAS (cars, clients, sellers) no schema se não existir.
 
 import subprocess, sys, os
 from typing import Optional
 
 # ---------- Auto-instalação de dependências ----------
-REQUIRED = ["fastapi", "uvicorn[standard]", "sqlalchemy", "pydantic", "psycopg2-binary"]
+REQUIRED = [
+    "fastapi",
+    "uvicorn[standard]",
+    "sqlalchemy",
+    "pydantic",
+    "psycopg2-binary",
+    "python-multipart",   # necessário para Form(...)
+]
 def ensure_packages(pkgs):
     for pkg in pkgs:
         try:
@@ -22,11 +29,13 @@ ensure_packages(REQUIRED)
 # ---------- Importes após garantir libs ----------
 from fastapi import FastAPI, HTTPException, Form
 from fastapi.responses import HTMLResponse, PlainTextResponse
-from sqlalchemy import create_engine, Column, Integer, String, Numeric, text, UniqueConstraint
+from sqlalchemy import (
+    create_engine, Column, Integer, String, Numeric, text,
+    UniqueConstraint, Date
+)
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.engine.url import make_url
 from sqlalchemy import inspect as sa_inspect
-from sqlalchemy import Date
 from datetime import datetime, date
 
 # ---------- Config do banco (PostgreSQL) ----------
@@ -41,10 +50,13 @@ SCHEMA_NAME = os.getenv("DB_SCHEMA", "carshop")
 
 def ensure_database(db_url_str: str):
     """Cria o database alvo se não existir, conectando-se ao DB 'postgres'."""
-    url = make_url(db_url_str)
+    from sqlalchemy import create_engine as _create
+    from sqlalchemy.engine.url import make_url as _make_url
+
+    url = _make_url(db_url_str)
     target_db = url.database
     admin_url = url.set(database="postgres")
-    admin_engine = create_engine(admin_url, isolation_level="AUTOCOMMIT", future=True)
+    admin_engine = _create(admin_url, isolation_level="AUTOCOMMIT", future=True)
 
     with admin_engine.connect() as conn:
         exists = conn.execute(
@@ -91,12 +103,11 @@ def ensure_cars_table():
         print(f"[SETUP] Criando tabela {SCHEMA_NAME}.cars ...")
         Base.metadata.create_all(bind=engine, tables=[Car.__table__])
     else:
-        # sincroniza metadados sem recriar
         Base.metadata.create_all(bind=engine, tables=[Car.__table__])
         print(f"[INFO] Tabela {SCHEMA_NAME}.cars já existe — nenhuma ação necessária.")
 ensure_cars_table()
 
-# ---------- Modelo CLIENTE (seguindo padrão do Car) ----------
+# ---------- Modelo CLIENTE ----------
 class Client(Base):
     __tablename__ = "clients"
     __table_args__ = (
@@ -118,6 +129,29 @@ def ensure_clients_table():
         Base.metadata.create_all(bind=engine, tables=[Client.__table__])
         print(f"[INFO] Tabela {SCHEMA_NAME}.clients já existe — nenhuma ação necessária.")
 ensure_clients_table()
+
+# ---------- Modelo SELLER (Vendedor) ----------
+class Seller(Base):
+    __tablename__ = "sellers"
+    __table_args__ = (
+        UniqueConstraint("cpf", name="uq_sellers_cpf"),
+        {"schema": SCHEMA_NAME},
+    )
+    id = Column(Integer, primary_key=True, index=True)
+    nome = Column(String(200), nullable=False)
+    email = Column(String(200), nullable=False)
+    cpf = Column(String(11), nullable=False, index=True)  # somente dígitos (11)
+
+# 5) Garante tabela sellers
+def ensure_sellers_table():
+    insp = sa_inspect(engine)
+    if not insp.has_table("sellers", schema=SCHEMA_NAME):
+        print(f"[SETUP] Criando tabela {SCHEMA_NAME}.sellers ...")
+        Base.metadata.create_all(bind=engine, tables=[Seller.__table__])
+    else:
+        Base.metadata.create_all(bind=engine, tables=[Seller.__table__])
+        print(f"[INFO] Tabela {SCHEMA_NAME}.sellers já existe — nenhuma ação necessária.")
+ensure_sellers_table()
 
 # ---------- App ----------
 app = FastAPI(title="CarShop • Impacta (PostgreSQL, auto-setup com schema)")
@@ -195,15 +229,15 @@ DASHBOARD_PAGE = """<!doctype html>
       </div>
 
       <div class="card center">
-        <div class="big">Vendas</div>
+        <div class="big">Vendas (em breve)</div>
         <div class="desc">Fluxo de vendas (em breve). Já com botões de atalho.</div>
         <a class="btn btn-secondary" href="/sales">Abrir</a>
       </div>
 
       <div class="card center">
         <div class="big">Vendedores</div>
-        <div class="desc">Cadastro de vendedores (em breve).</div>
-        <a class="btn btn-secondary" href="/sellers">Abrir</a>
+        <div class="desc">Cadastro de vendedores com nome, e-mail e CPF.</div>
+        <a class="btn btn-primary" href="/sellers">Abrir</a>
       </div>
     </div>
   </div>
@@ -341,7 +375,7 @@ CLIENTS_PAGE = """<!doctype html>
           <input id="data_nascimento" type="date" required>
         </div>
 
-        <div class="actions" style="grid-column: 1 / -1; margin-top: 4px;">
+        <div class="actions" style="grid-column: 1 / -1; margin-top: 4px%;">
           <button type="submit" class="btn-primary">Salvar</button>
           <button type="button" id="btnNewClient" class="btn-secondary">Novo</button>
         </div>
@@ -377,7 +411,7 @@ CLIENTS_PAGE = """<!doctype html>
 </html>
 """
 
-# ---------- HTML Vendas (placeholder preparado) ----------
+# ---------- HTML Vendas (placeholder em breve) ----------
 SALES_PAGE = """<!doctype html>
 <html lang="pt-br">
 <head>
@@ -409,7 +443,7 @@ SALES_PAGE = """<!doctype html>
 </html>
 """
 
-# ---------- HTML Vendedores (placeholder preparado) ----------
+# ---------- HTML Vendedores (CRUD completo) ----------
 SELLERS_PAGE = """<!doctype html>
 <html lang="pt-br">
 <head>
@@ -429,13 +463,56 @@ SELLERS_PAGE = """<!doctype html>
       <a href="/sellers" class="active">Vendedores</a>
     </div>
 
-    <div class="card">
-      <p class="muted">Em breve: cadastro de vendedores.</p>
-      <div class="actions">
-        <a class="btn btn-primary" href="/sellers">+ Cadastrar Vendedor</a>
+    <h2>Cadastro / Edição</h2>
+    <form id="sellerForm" class="card">
+      <input type="hidden" id="sellerId">
+      <div class="grid">
+        <div class="field">
+          <label for="sellerNome">Nome</label>
+          <input id="sellerNome" required placeholder="Ex.: João Vendedor">
+        </div>
+        <div class="field">
+          <label for="sellerEmail">E-mail</label>
+          <input id="sellerEmail" required placeholder="Ex.: joao@carshop.com">
+        </div>
+        <div class="field">
+          <label for="sellerCPF">CPF</label>
+          <input id="sellerCPF" required placeholder="Somente dígitos (11)">
+        </div>
+
+        <div class="actions" style="grid-column: 1 / -1; margin-top: 4px;">
+          <button type="submit" class="btn-primary">Salvar</button>
+          <button type="button" id="btnNewSeller" class="btn-secondary">Novo</button>
+        </div>
       </div>
+    </form>
+
+    <h2>Lista</h2>
+    <div class="card">
+      <div class="toolbar" style="margin-bottom:10px;">
+        <input id="filterSellerNome" placeholder="Filtrar por nome" style="flex:1;">
+        <input id="filterSellerEmail" placeholder="Filtrar por e-mail" style="flex:1;">
+        <input id="filterSellerCPF" placeholder="Filtrar por CPF (somente dígitos)" style="flex:1;">
+        <button id="btnFilterSeller" class="btn-secondary">Filtrar</button>
+        <button id="btnClearSeller" class="btn-secondary">Limpar</button>
+      </div>
+
+      <table id="sellersTable">
+        <thead>
+          <tr>
+            <th>ID</th><th>Nome</th><th>E-mail</th><th>CPF</th><th>Ações</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
     </div>
+
+    <p class="muted" style="margin-top:12px;">
+      CPF é salvo apenas com dígitos (11). Unicidade garantida por CPF.
+    </p>
   </div>
+
+  <script src="/assets/sellers.js"></script>
 </body>
 </html>
 """
@@ -697,6 +774,139 @@ if (document.getElementById('btnClearClient')) {
 if (tbodyC) loadClients();
 """
 
+# ---------- JavaScript Vendedores ----------
+JS_SELLERS = r"""
+const tbodyS = document.querySelector('#sellersTable tbody');
+const formS = document.getElementById('sellerForm');
+
+const sellerId = document.getElementById('sellerId');
+const sellerNome = document.getElementById('sellerNome');
+const sellerEmail = document.getElementById('sellerEmail');
+const sellerCPF = document.getElementById('sellerCPF');
+
+const filterSellerNome = document.getElementById('filterSellerNome');
+const filterSellerEmail = document.getElementById('filterSellerEmail');
+const filterSellerCPF = document.getElementById('filterSellerCPF');
+
+function onlyDigits(str){ return (str || '').replace(/\D+/g, ''); }
+
+if (sellerCPF) {
+  sellerCPF.addEventListener('input', ()=> {
+    sellerCPF.value = onlyDigits(sellerCPF.value).slice(0,11);
+    if (sellerCPF.value.length !== 11) sellerCPF.setCustomValidity('CPF deve conter 11 dígitos.');
+    else sellerCPF.setCustomValidity('');
+  });
+}
+
+if (sellerEmail) {
+  sellerEmail.addEventListener('input', ()=> {
+    const v = (sellerEmail.value || '').trim();
+    if (!v.includes('@') || !v.includes('.')) {
+      sellerEmail.setCustomValidity('Informe um e-mail válido.');
+    } else {
+      sellerEmail.setCustomValidity('');
+    }
+  });
+}
+
+function validateSellerForm(){
+  if (!sellerNome.value.trim()) { sellerNome.setCustomValidity('Informe o nome.'); }
+  else sellerNome.setCustomValidity('');
+  const c = onlyDigits(sellerCPF.value);
+  if (c.length !== 11) sellerCPF.setCustomValidity('CPF deve conter 11 dígitos.');
+  else sellerCPF.setCustomValidity('');
+  const v = (sellerEmail.value || '').trim();
+  if (!v.includes('@') || !v.includes('.')) {
+    sellerEmail.setCustomValidity('Informe um e-mail válido.');
+  } else {
+    sellerEmail.setCustomValidity('');
+  }
+  return formS.reportValidity();
+}
+
+function formatCPF(v){
+  const d = onlyDigits(v);
+  if (d.length !== 11) return v || '';
+  return `${d.slice(0,3)}.${d.slice(3,6)}.${d.slice(6,9)}-${d.slice(9)}`;
+}
+
+async function loadSellers(){
+  const params = new URLSearchParams();
+  if (filterSellerNome && filterSellerNome.value.trim()) params.set('nome', filterSellerNome.value.trim());
+  if (filterSellerEmail && filterSellerEmail.value.trim()) params.set('email', filterSellerEmail.value.trim());
+  if (filterSellerCPF && onlyDigits(filterSellerCPF.value)) params.set('cpf', onlyDigits(filterSellerCPF.value));
+  const qs = params.toString() ? ('?' + params.toString()) : '';
+  const res = await fetch('/api/sellers' + qs);
+  const list = await res.json();
+  if (!tbodyS) return;
+  tbodyS.innerHTML = list.map(s => `
+    <tr>
+      <td>${s.id}</td>
+      <td>${s.nome}</td>
+      <td>${s.email}</td>
+      <td>${formatCPF(s.cpf)}</td>
+      <td>
+        <button type="button" onclick="editSeller(${s.id})">Editar</button>
+        <button type="button" onclick="deleteSeller(${s.id})">Excluir</button>
+      </td>
+    </tr>
+  `).join('');
+}
+
+if (formS) {
+  formS.addEventListener('submit', async e => {
+    e.preventDefault();
+    if (!validateSellerForm()) return;
+    const payload = new URLSearchParams({
+      nome: sellerNome.value.trim(),
+      email: sellerEmail.value.trim(),
+      cpf: onlyDigits(sellerCPF.value)
+    });
+    if (sellerId.value){
+      await fetch('/api/sellers/' + sellerId.value, { method:'PUT', body: payload });
+    } else {
+      await fetch('/api/sellers', { method:'POST', body: payload });
+    }
+    sellerId.value = ""; formS.reset(); loadSellers();
+  });
+}
+
+window.editSeller = async id => {
+  const res = await fetch('/api/sellers');
+  const list = await res.json();
+  const s = list.find(x => x.id === id);
+  if (!s) return;
+  sellerId.value = s.id;
+  sellerNome.value = s.nome;
+  sellerEmail.value = s.email;
+  sellerCPF.value = s.cpf;
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+};
+
+window.deleteSeller = async id => {
+  if (!confirm('Confirma excluir?')) return;
+  await fetch('/api/sellers/' + id, { method:'DELETE' });
+  loadSellers();
+};
+
+if (document.getElementById('btnNewSeller')) {
+  document.getElementById('btnNewSeller').onclick = ()=>{ sellerId.value=""; formS.reset(); };
+}
+if (document.getElementById('btnFilterSeller')) {
+  document.getElementById('btnFilterSeller').onclick = loadSellers;
+}
+if (document.getElementById('btnClearSeller')) {
+  document.getElementById('btnClearSeller').onclick = ()=>{ 
+    filterSellerNome.value=""; 
+    filterSellerEmail.value="";
+    filterSellerCPF.value=""; 
+    loadSellers(); 
+  };
+}
+
+if (tbodyS) loadSellers();
+"""
+
 # ---------- Rotas de Front ----------
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
@@ -729,6 +939,29 @@ def app_js():
 @app.get("/assets/clients.js", response_class=PlainTextResponse)
 def clients_js():
     return PlainTextResponse(JS_CLIENTS, media_type="application/javascript; charset=utf-8")
+
+@app.get("/assets/sellers.js", response_class=PlainTextResponse)
+def sellers_js():
+    return PlainTextResponse(JS_SELLERS, media_type="application/javascript; charset=utf-8")
+
+# ---------- Helpers Gerais ----------
+def _parse_date_or_400(value: str) -> date:
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except Exception:
+        raise HTTPException(status_code=400, detail="data_nascimento inválida (use YYYY-MM-DD)")
+
+def _cpf_digits_or_400(value: str) -> str:
+    digits = "".join(ch for ch in (value or "") if ch.isdigit())
+    if len(digits) != 11:
+        raise HTTPException(status_code=400, detail="CPF deve conter 11 dígitos.")
+    return digits
+
+def _email_or_400(value: str) -> str:
+    v = (value or "").strip()
+    if "@" not in v or "." not in v:
+        raise HTTPException(status_code=400, detail="E-mail inválido.")
+    return v
 
 # ---------- API: Cars ----------
 @app.get("/api/cars")
@@ -790,19 +1023,6 @@ def delete_car(car_id: int):
         return {"ok": True}
     finally:
         db.close()
-
-# ---------- Helpers Clientes ----------
-def _parse_date_or_400(value: str) -> date:
-    try:
-        return datetime.strptime(value, "%Y-%m-%d").date()
-    except Exception:
-        raise HTTPException(status_code=400, detail="data_nascimento inválida (use YYYY-MM-DD)")
-
-def _cpf_digits_or_400(value: str) -> str:
-    digits = "".join(ch for ch in (value or "") if ch.isdigit())
-    if len(digits) != 11:
-        raise HTTPException(status_code=400, detail="CPF deve conter 11 dígitos.")
-    return digits
 
 # ---------- API: Clients ----------
 @app.get("/api/clients")
@@ -886,6 +1106,102 @@ def delete_client(client_id: int):
         c = db.query(Client).get(client_id)
         if c:
             db.delete(c); db.commit()
+        return {"ok": True}
+    finally:
+        db.close()
+
+# ---------- API: Sellers ----------
+@app.get("/api/sellers")
+def list_sellers(
+    nome: Optional[str] = None,
+    email: Optional[str] = None,
+    cpf: Optional[str] = None,
+):
+    db = SessionLocal()
+    try:
+        q = db.query(Seller)
+        if nome:
+            q = q.filter(Seller.nome.ilike(f"%{nome}%"))
+        if email:
+            q = q.filter(Seller.email.ilike(f"%{email}%"))
+        if cpf:
+            digits = "".join(ch for ch in cpf if ch.isdigit())
+            if digits:
+                q = q.filter(Seller.cpf == digits)
+        rows = q.order_by(Seller.id.desc()).all()
+        return [
+            dict(
+                id=r.id,
+                nome=r.nome,
+                email=r.email,
+                cpf=r.cpf,
+            )
+            for r in rows
+        ]
+    finally:
+        db.close()
+
+@app.post("/api/sellers")
+def create_seller(
+    nome: str = Form(...),
+    email: str = Form(...),
+    cpf: str = Form(...),
+):
+    db = SessionLocal()
+    try:
+        cpf_digits = _cpf_digits_or_400(cpf)
+        email_norm = _email_or_400(email)
+
+        exists = db.query(Seller).filter(Seller.cpf == cpf_digits).first()
+        if exists:
+            raise HTTPException(status_code=409, detail="CPF já cadastrado para outro vendedor.")
+
+        s = Seller(
+            nome=nome.strip(),
+            email=email_norm,
+            cpf=cpf_digits,
+        )
+        db.add(s); db.commit(); db.refresh(s)
+        return {"id": s.id}
+    finally:
+        db.close()
+
+@app.put("/api/sellers/{seller_id}")
+def update_seller(
+    seller_id: int,
+    nome: str = Form(...),
+    email: str = Form(...),
+    cpf: str = Form(...),
+):
+    db = SessionLocal()
+    try:
+        s = db.query(Seller).get(seller_id)
+        if not s:
+            raise HTTPException(status_code=404, detail="Vendedor não encontrado.")
+
+        cpf_digits = _cpf_digits_or_400(cpf)
+        email_norm = _email_or_400(email)
+
+        dup = db.query(Seller).filter(Seller.cpf == cpf_digits, Seller.id != seller_id).first()
+        if dup:
+            raise HTTPException(status_code=409, detail="CPF já cadastrado em outro vendedor.")
+
+        s.nome = nome.strip()
+        s.email = email_norm
+        s.cpf = cpf_digits
+
+        db.commit()
+        return {"ok": True}
+    finally:
+        db.close()
+
+@app.delete("/api/sellers/{seller_id}")
+def delete_seller(seller_id: int):
+    db = SessionLocal()
+    try:
+        s = db.query(Seller).get(seller_id)
+        if s:
+            db.delete(s); db.commit()
         return {"ok": True}
     finally:
         db.close()

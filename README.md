@@ -3,6 +3,10 @@
 Antonio Fabio Lima Silva
 RA: 2302656
 
+Video - caso o youtube não abra devido a políticas internas
+
+
+
 ⚙️ Funcionalidades Entregues
 URL da Aplicação
 
