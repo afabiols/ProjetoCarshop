@@ -184,6 +184,43 @@ Rode em outra porta: uvicorn app:app --reload --port 8001
 CPF inválido:
 O backend exige 11 dígitos. Remova máscara/pontos/traços.
 
+Extensão para Diagrama PlanUML
+
+View para consulta de vendas
+
+SELECT
+    o.id                    AS id_pedido,
+    o.created_at            AS data_pedido,
+
+    -- Carro
+    car.id                  AS id_carro,
+    car.brand               AS marca_carro,
+    car.model               AS modelo_carro,
+    car.year                AS ano_carro,
+    car.color               AS cor_carro,
+    car.price               AS preco_unitario,
+    car.quantity            AS estoque_atual,
+
+    -- Cliente
+    c.id                    AS id_cliente,
+    c.nome                  AS nome_cliente,
+    c.cpf                   AS cpf_cliente,
+    c.data_nascimento       AS data_nascimento_cliente,
+
+    -- Vendedor
+    s.id                    AS id_vendedor,
+    s.nome                  AS nome_vendedor,
+    s.email                 AS email_vendedor,
+    s.cpf                   AS cpf_vendedor,
+
+    -- Dados do pedido
+    o.quantity              AS quantidade_vendida,
+    o.total_value           AS valor_total
+FROM carshop.orders  o
+JOIN carshop.cars    car ON o.car_id    = car.id
+JOIN carshop.clients c   ON o.client_id = c.id
+JOIN carshop.sellers s   ON o.seller_id = s.id;
+
 📝 Licença
 
 MIT — sinta-se à vontade para usar e adaptar.
