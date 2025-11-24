@@ -1,21 +1,22 @@
-# app.py — Monolito: Front (HTML + CSS + JS) + API + DB (PostgreSQL)
+# app.py — Monolito: Front (HTML + CSS + JS) + API + DB (PostgreSQL, sem SQLAlchemy)
 # Executar: python app.py
 # Auto-setup:
 # 1) cria o DATABASE se não existir;
 # 2) cria o SCHEMA (padrão: carshop) se não existir;
-# 3) cria as TABELAS (cars, clients, sellers) no schema se não existir.
+# 3) cria as TABELAS (cars, clients, sellers, orders) no schema se não existir.
 
 import subprocess, sys, os
 from typing import Optional
+from urllib.parse import urlparse
+from datetime import datetime, date
 
 # ---------- Auto-instalação de dependências ----------
 REQUIRED = [
     "fastapi",
     "uvicorn[standard]",
-    "sqlalchemy",
     "pydantic",
-    "psycopg2-binary",
-    "python-multipart",   # necessário para Form(...)
+    "psycopg2-binary",   # PostgreSQL driver
+    "python-multipart",  # necessário para Form(...)
 ]
 def ensure_packages(pkgs):
     for pkg in pkgs:
@@ -29,16 +30,10 @@ ensure_packages(REQUIRED)
 # ---------- Importes após garantir libs ----------
 from fastapi import FastAPI, HTTPException, Form
 from fastapi.responses import HTMLResponse, PlainTextResponse
-from sqlalchemy import (
-    create_engine, Column, Integer, String, Numeric, text,
-    UniqueConstraint, Date
-)
-from sqlalchemy.orm import sessionmaker, declarative_base
-from sqlalchemy.engine.url import make_url
-from sqlalchemy import inspect as sa_inspect
-from datetime import datetime, date
+import psycopg2
 
 # ---------- Config do banco (PostgreSQL) ----------
+# Mantém o mesmo formato do monolito original: postgresql+psycopg2://user:pass@host:port/db
 DEFAULT_PG_URL = "postgresql+psycopg2://postgres@localhost:5432/carshop"
 DATABASE_URL = os.getenv("DATABASE_URL", DEFAULT_PG_URL)
 
@@ -48,113 +43,121 @@ if DATABASE_URL.startswith("sqlite"):
 # Nome do schema (padrão 'carshop'); pode trocar via variável de ambiente DB_SCHEMA
 SCHEMA_NAME = os.getenv("DB_SCHEMA", "carshop")
 
-def ensure_database(db_url_str: str):
-    """Cria o database alvo se não existir, conectando-se ao DB 'postgres'."""
-    from sqlalchemy import create_engine as _create
-    from sqlalchemy.engine.url import make_url as _make_url
+def parse_pg_url(url: str) -> dict:
+    """
+    Converte a URL no formato postgresql+psycopg2://user:pass@host:port/db
+    em um dicionário para psycopg2.connect.
+    """
+    parsed = urlparse(url)
+    # esquema pode vir como "postgresql+psycopg2"
+    user = parsed.username or "postgres"
+    password = parsed.password or ""
+    host = parsed.hostname or "localhost"
+    port = parsed.port or 5432
+    dbname = (parsed.path or "/").lstrip("/") or "postgres"
+    return dict(user=user, password=password, host=host, port=port, dbname=dbname)
 
-    url = _make_url(db_url_str)
-    target_db = url.database
-    admin_url = url.set(database="postgres")
-    admin_engine = _create(admin_url, isolation_level="AUTOCOMMIT", future=True)
+PG_CONFIG = parse_pg_url(DATABASE_URL)
 
-    with admin_engine.connect() as conn:
-        exists = conn.execute(
-            text("SELECT 1 FROM pg_database WHERE datname = :name"),
-            {"name": target_db}
-        ).scalar()
-        if not exists:
-            print(f"[SETUP] Criando database '{target_db}' ...")
-            conn.execute(text(f'CREATE DATABASE "{target_db}"'))
-    admin_engine.dispose()
+def get_conn(dbname: Optional[str] = None):
+    cfg = PG_CONFIG.copy()
+    if dbname:
+        cfg["dbname"] = dbname
+    return psycopg2.connect(**cfg)
+
+def ensure_database():
+    """
+    Cria o database alvo se não existir, conectando-se ao DB 'postgres'.
+    """
+    target_db = PG_CONFIG["dbname"]
+    admin_conn = get_conn(dbname="postgres")
+    admin_conn.autocommit = True
+    try:
+        with admin_conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (target_db,))
+            exists = cur.fetchone()
+            if not exists:
+                print(f"[SETUP] Criando database '{target_db}' ...")
+                cur.execute(f'CREATE DATABASE "{target_db}"')
+    finally:
+        admin_conn.close()
 
 # 1) Garante database
-ensure_database(DATABASE_URL)
+ensure_database()
 
-# Conecta no database alvo
-engine = create_engine(DATABASE_URL, echo=False, future=True)
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
-Base = declarative_base()
+def ensure_schema(schema: str):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}"')
+        conn.commit()
+    finally:
+        conn.close()
 
 # 2) Garante schema
-def ensure_schema(schema: str):
-    with engine.begin() as conn:
-        conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
 ensure_schema(SCHEMA_NAME)
 
-# ---------- Modelo CAR (com schema explícito) ----------
-class Car(Base):
-    __tablename__ = "cars"
-    __table_args__ = {"schema": SCHEMA_NAME}  # tabela no schema carshop
-    id = Column(Integer, primary_key=True, index=True)
-    brand = Column(String(60), nullable=False)
-    model = Column(String(80), nullable=False)
-    year = Column(Integer, nullable=False)
-    color = Column(String(40), default="")
-    mileage_km = Column(Integer, default=0)
-    price = Column(Numeric(12, 2), nullable=False)
-    quantity = Column(Integer, default=0)
-    status = Column(String(12), default="Ativo")  # Ativo / Inativo
+def ensure_tables(schema: str):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            # Tabela cars
+            cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS "{schema}".cars (
+                id SERIAL PRIMARY KEY,
+                brand        VARCHAR(60)  NOT NULL,
+                model        VARCHAR(80)  NOT NULL,
+                year         INTEGER      NOT NULL,
+                color        VARCHAR(40)  DEFAULT '',
+                mileage_km   INTEGER      DEFAULT 0,
+                price        NUMERIC(12,2) NOT NULL,
+                quantity     INTEGER      DEFAULT 0,
+                status       VARCHAR(12)  DEFAULT 'Ativo'
+            );
+            """)
 
-# 3) Garante tabela cars
-def ensure_cars_table():
-    insp = sa_inspect(engine)
-    if not insp.has_table("cars", schema=SCHEMA_NAME):
-        print(f"[SETUP] Criando tabela {SCHEMA_NAME}.cars ...")
-        Base.metadata.create_all(bind=engine, tables=[Car.__table__])
-    else:
-        Base.metadata.create_all(bind=engine, tables=[Car.__table__])
-        print(f"[INFO] Tabela {SCHEMA_NAME}.cars já existe — nenhuma ação necessária.")
-ensure_cars_table()
+            # Tabela clients
+            cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS "{schema}".clients (
+                id              SERIAL PRIMARY KEY,
+                nome            VARCHAR(200) NOT NULL,
+                cpf             VARCHAR(11)  NOT NULL UNIQUE,
+                data_nascimento DATE         NOT NULL
+            );
+            """)
 
-# ---------- Modelo CLIENTE ----------
-class Client(Base):
-    __tablename__ = "clients"
-    __table_args__ = (
-        UniqueConstraint("cpf", name="uq_clients_cpf"),
-        {"schema": SCHEMA_NAME},
-    )
-    id = Column(Integer, primary_key=True, index=True)
-    nome = Column(String(200), nullable=False)
-    cpf = Column(String(11), nullable=False, index=True)  # somente dígitos (11)
-    data_nascimento = Column(Date, nullable=False)
+            # Tabela sellers
+            cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS "{schema}".sellers (
+                id      SERIAL PRIMARY KEY,
+                nome    VARCHAR(200) NOT NULL,
+                email   VARCHAR(200) NOT NULL,
+                cpf     VARCHAR(11)  NOT NULL UNIQUE
+            );
+            """)
 
-# 4) Garante tabela clients
-def ensure_clients_table():
-    insp = sa_inspect(engine)
-    if not insp.has_table("clients", schema=SCHEMA_NAME):
-        print(f"[SETUP] Criando tabela {SCHEMA_NAME}.clients ...")
-        Base.metadata.create_all(bind=engine, tables=[Client.__table__])
-    else:
-        Base.metadata.create_all(bind=engine, tables=[Client.__table__])
-        print(f"[INFO] Tabela {SCHEMA_NAME}.clients já existe — nenhuma ação necessária.")
-ensure_clients_table()
+            # Tabela orders (pedidos)
+            cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS "{schema}".orders (
+                id          SERIAL PRIMARY KEY,
+                seller_id   INTEGER     NOT NULL,
+                client_id   INTEGER     NOT NULL,
+                car_id      INTEGER     NOT NULL,
+                quantity    INTEGER     NOT NULL,
+                total_value NUMERIC(12,2) NOT NULL,
+                created_at  TIMESTAMP   DEFAULT NOW()
+            );
+            """)
+        conn.commit()
+        print(f"[SETUP] Tabelas garantidas em schema '{schema}'.")
+    finally:
+        conn.close()
 
-# ---------- Modelo SELLER (Vendedor) ----------
-class Seller(Base):
-    __tablename__ = "sellers"
-    __table_args__ = (
-        UniqueConstraint("cpf", name="uq_sellers_cpf"),
-        {"schema": SCHEMA_NAME},
-    )
-    id = Column(Integer, primary_key=True, index=True)
-    nome = Column(String(200), nullable=False)
-    email = Column(String(200), nullable=False)
-    cpf = Column(String(11), nullable=False, index=True)  # somente dígitos (11)
-
-# 5) Garante tabela sellers
-def ensure_sellers_table():
-    insp = sa_inspect(engine)
-    if not insp.has_table("sellers", schema=SCHEMA_NAME):
-        print(f"[SETUP] Criando tabela {SCHEMA_NAME}.sellers ...")
-        Base.metadata.create_all(bind=engine, tables=[Seller.__table__])
-    else:
-        Base.metadata.create_all(bind=engine, tables=[Seller.__table__])
-        print(f"[INFO] Tabela {SCHEMA_NAME}.sellers já existe — nenhuma ação necessária.")
-ensure_sellers_table()
+# 3) Garante tabelas
+ensure_tables(SCHEMA_NAME)
 
 # ---------- App ----------
-app = FastAPI(title="CarShop • Impacta (PostgreSQL, auto-setup com schema)")
+app = FastAPI(title="CarShop • Impacta (PostgreSQL, auto-setup com schema, sem SQLAlchemy)")
 
 # ---------- CSS ----------
 CSS_STYLES = """
@@ -229,9 +232,9 @@ DASHBOARD_PAGE = """<!doctype html>
       </div>
 
       <div class="card center">
-        <div class="big">Vendas (em breve)</div>
-        <div class="desc">Fluxo de vendas (em breve). Já com botões de atalho.</div>
-        <a class="btn btn-secondary" href="/sales">Abrir</a>
+        <div class="big">Vendas</div>
+        <div class="desc">Fluxo de pedidos com baixa automática de estoque.</div>
+        <a class="btn btn-primary" href="/sales">Abrir</a>
       </div>
 
       <div class="card center">
@@ -411,7 +414,7 @@ CLIENTS_PAGE = """<!doctype html>
 </html>
 """
 
-# ---------- HTML Vendas (placeholder em breve) ----------
+# ---------- HTML Vendas (Registrar Pedido) ----------
 SALES_PAGE = """<!doctype html>
 <html lang="pt-br">
 <head>
@@ -422,7 +425,7 @@ SALES_PAGE = """<!doctype html>
 </head>
 <body>
   <div class="container">
-    <h1>Vendas</h1>
+    <h1>Vendas / Pedidos</h1>
     <div class="nav">
       <a href="/">Início</a>
       <a href="/cars">Carros</a>
@@ -431,14 +434,74 @@ SALES_PAGE = """<!doctype html>
       <a href="/sellers">Vendedores</a>
     </div>
 
-    <div class="card">
-      <p class="muted">Em breve: fluxo completo de vendas.</p>
-      <div class="actions">
-        <a class="btn btn-primary" href="/clients">+ Nova Venda (selecionar Cliente)</a>
-        <a class="btn btn-secondary" href="/cars">Escolher Carro</a>
+    <h2>Registrar Pedido</h2>
+    <form id="orderForm" class="card">
+      <div class="grid">
+        <div class="field">
+          <label for="orderSeller">Vendedor</label>
+          <select id="orderSeller" required>
+            <option value="">Selecione...</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="orderClient">Cliente</label>
+          <select id="orderClient" required>
+            <option value="">Selecione...</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="orderCar">Carro</label>
+          <select id="orderCar" required>
+            <option value="">Selecione...</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="orderQuantity">Quantidade</label>
+          <input type="number" id="orderQuantity" min="1" value="1" required>
+        </div>
+
+        <div class="field">
+          <label for="orderTotal">Valor total (R$)</label>
+          <input id="orderTotal" type="text" readonly placeholder="Será calculado">
+        </div>
+
+        <div class="actions" style="grid-column: 1 / -1; margin-top: 4px;">
+          <button type="submit" class="btn-primary">Registrar Pedido</button>
+        </div>
       </div>
+    </form>
+
+    <h2>Histórico de Pedidos</h2>
+    <div class="card">
+      <table id="ordersTable">
+        <thead>
+          <tr>
+            <th>ID Pedido</th>
+            <th>ID Carro</th>
+            <th>Carro</th>
+            <th>Valor Unit. (R$)</th>
+            <th>Qtd</th>
+            <th>Total (R$)</th>
+            <th>ID Vendedor</th>
+            <th>Vendedor</th>
+            <th>ID Cliente</th>
+            <th>Cliente</th>
+            <th>Data</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
     </div>
+
+    <p class="muted" style="margin-top:12px;">
+      Registre pedidos utilizando os cadastros existentes de clientes, carros e vendedores.
+    </p>
   </div>
+
+  <script src="/assets/sales.js"></script>
 </body>
 </html>
 """
@@ -907,6 +970,151 @@ if (document.getElementById('btnClearSeller')) {
 if (tbodyS) loadSellers();
 """
 
+# ---------- JavaScript Vendas / Pedidos ----------
+JS_SALES = r"""
+const orderForm = document.getElementById('orderForm');
+
+const sellerSelect = document.getElementById('orderSeller');
+const clientSelect = document.getElementById('orderClient');
+const carSelect = document.getElementById('orderCar');
+const quantityInput = document.getElementById('orderQuantity');
+const totalInput = document.getElementById('orderTotal');
+const ordersTbody = document.querySelector('#ordersTable tbody');
+
+let carsCache = [];
+
+function formatMoney(v) {
+  const n = Number(v || 0);
+  return n.toFixed(2);
+}
+
+async function loadSellers() {
+  if (!sellerSelect) return;
+  const res = await fetch('/api/sellers');
+  const list = await res.json();
+  sellerSelect.innerHTML = '<option value=\"\">Selecione...</option>' +
+    list.map(s => `<option value=\"${s.id}\">${s.nome}</option>`).join('');
+}
+
+async function loadClients() {
+  if (!clientSelect) return;
+  const res = await fetch('/api/clients');
+  const list = await res.json();
+  clientSelect.innerHTML = '<option value=\"\">Selecione...</option>' +
+    list.map(c => `<option value=\"${c.id}\">${c.nome}</option>`).join('');
+}
+
+async function loadCarsForOrder() {
+  if (!carSelect) return;
+  const res = await fetch('/api/cars');
+  const list = await res.json();
+  // Só carros ativos com estoque > 0
+  carsCache = list.filter(c => c.status === 'Ativo' && (c.quantity || 0) > 0);
+
+  carSelect.innerHTML = '<option value=\"\">Selecione...</option>' +
+    carsCache.map(c =>
+      `<option value=\"${c.id}\">${c.brand} ${c.model} (Estoque: ${c.quantity} • R$ ${formatMoney(c.price)})</option>`
+    ).join('');
+  updateTotal();
+}
+
+function updateTotal() {
+  if (!carSelect || !totalInput || !quantityInput) return;
+  const carId = parseInt(carSelect.value || '0', 10);
+  const qty = parseInt(quantityInput.value || '0', 10);
+  const car = carsCache.find(c => c.id === carId);
+  if (!car || !qty || qty <= 0) {
+    totalInput.value = '';
+    return;
+  }
+  const total = Number(car.price) * qty;
+  totalInput.value = formatMoney(total);
+}
+
+async function loadOrders() {
+  if (!ordersTbody) return;
+  const res = await fetch('/api/orders');
+  const list = await res.json();
+  ordersTbody.innerHTML = list.map(o => `
+    <tr>
+      <td>${o.id}</td>
+      <td>${o.car_id}</td>
+      <td>${o.car_description}</td>
+      <td>R$ ${formatMoney(o.car_price)}</td>
+      <td>${o.quantity}</td>
+      <td>R$ ${formatMoney(o.total_value)}</td>
+      <td>${o.seller_id}</td>
+      <td>${o.seller}</td>
+      <td>${o.client_id}</td>
+      <td>${o.client}</td>
+      <td>${o.created_at || ''}</td>
+    </tr>
+  `).join('');
+}
+
+if (orderForm) {
+  carSelect.addEventListener('change', updateTotal);
+  quantityInput.addEventListener('input', () => {
+    if (!quantityInput.value || Number(quantityInput.value) < 1) {
+      quantityInput.value = 1;
+    }
+    updateTotal();
+  });
+
+  orderForm.addEventListener('submit', async e => {
+    e.preventDefault();
+    if (!sellerSelect.value || !clientSelect.value || !carSelect.value) {
+      alert('Selecione vendedor, cliente e carro.');
+      return;
+    }
+    const qty = parseInt(quantityInput.value || '0', 10);
+    if (!qty || qty <= 0) {
+      alert('Quantidade deve ser pelo menos 1.');
+      return;
+    }
+    const payload = new URLSearchParams({
+      seller_id: sellerSelect.value,
+      client_id: clientSelect.value,
+      car_id: carSelect.value,
+      quantity: String(qty),
+    });
+
+    const res = await fetch('/api/orders', {
+      method: 'POST',
+      body: payload
+    });
+
+    if (!res.ok) {
+      let msg = 'Erro ao registrar pedido.';
+      try {
+        const err = await res.json();
+        if (err && err.detail) msg = err.detail;
+      } catch(_) {}
+      alert(msg);
+      return;
+    }
+
+    orderForm.reset();
+    quantityInput.value = 1;
+    await loadCarsForOrder();  // atualiza estoque exibido
+    await loadOrders();
+    updateTotal();
+  });
+}
+
+async function initOrdersPage() {
+  if (!orderForm) return;
+  await Promise.all([
+    loadSellers(),
+    loadClients(),
+    loadCarsForOrder()
+  ]);
+  await loadOrders();
+}
+
+initOrdersPage();
+"""
+
 # ---------- Rotas de Front ----------
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
@@ -944,6 +1152,10 @@ def clients_js():
 def sellers_js():
     return PlainTextResponse(JS_SELLERS, media_type="application/javascript; charset=utf-8")
 
+@app.get("/assets/sales.js", response_class=PlainTextResponse)
+def sales_js():
+    return PlainTextResponse(JS_SALES, media_type="application/javascript; charset=utf-8")
+
 # ---------- Helpers Gerais ----------
 def _parse_date_or_400(value: str) -> date:
     try:
@@ -966,18 +1178,46 @@ def _email_or_400(value: str) -> str:
 # ---------- API: Cars ----------
 @app.get("/api/cars")
 def list_cars(brand: Optional[str] = None):
-    db = SessionLocal()
+    conn = get_conn()
     try:
-        q = db.query(Car)
-        if brand:
-            q = q.filter(Car.brand.ilike(f"%{brand}%"))
-        cars = q.order_by(Car.id.desc()).all()
-        return [dict(
-            id=c.id, brand=c.brand, model=c.model, year=c.year, color=c.color,
-            mileage_km=c.mileage_km, price=float(c.price), quantity=c.quantity, status=c.status
-        ) for c in cars]
+        with conn.cursor() as cur:
+            if brand:
+                cur.execute(
+                    f"""
+                    SELECT id, brand, model, year, color, mileage_km, price, quantity, status
+                    FROM "{SCHEMA_NAME}".cars
+                    WHERE brand ILIKE %s
+                    ORDER BY id DESC
+                    """,
+                    (f"%{brand}%",),
+                )
+            else:
+                cur.execute(
+                    f"""
+                    SELECT id, brand, model, year, color, mileage_km, price, quantity, status
+                    FROM "{SCHEMA_NAME}".cars
+                    ORDER BY id DESC
+                    """
+                )
+            rows = cur.fetchall()
+        result = []
+        for r in rows:
+            result.append(
+                dict(
+                    id=r[0],
+                    brand=r[1],
+                    model=r[2],
+                    year=r[3],
+                    color=r[4],
+                    mileage_km=r[5] if r[5] is not None else 0,
+                    price=float(r[6]),
+                    quantity=r[7] if r[7] is not None else 0,
+                    status=r[8] or "Ativo",
+                )
+            )
+        return result
     finally:
-        db.close()
+        conn.close()
 
 @app.post("/api/cars")
 def create_car(
@@ -985,14 +1225,23 @@ def create_car(
     color: str = Form(""), mileage_km: int = Form(0), price: float = Form(...),
     quantity: int = Form(0), status: str = Form("Ativo"),
 ):
-    db = SessionLocal()
+    conn = get_conn()
     try:
-        c = Car(brand=brand, model=model, year=year, color=color, mileage_km=mileage_km,
-                price=price, quantity=quantity, status=status)
-        db.add(c); db.commit(); db.refresh(c)
-        return {"id": c.id}
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                INSERT INTO "{SCHEMA_NAME}".cars
+                    (brand, model, year, color, mileage_km, price, quantity, status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (brand, model, year, color, mileage_km, price, quantity, status),
+            )
+            new_id = cur.fetchone()[0]
+        conn.commit()
+        return {"id": new_id}
     finally:
-        db.close()
+        conn.close()
 
 @app.put("/api/cars/{car_id}")
 def update_car(
@@ -1001,53 +1250,80 @@ def update_car(
     color: str = Form(""), mileage_km: int = Form(0), price: float = Form(...),
     quantity: int = Form(0), status: str = Form("Ativo"),
 ):
-    db = SessionLocal()
+    conn = get_conn()
     try:
-        c = db.query(Car).get(car_id)
-        if not c:
-            raise HTTPException(404, "Car not found")
-        c.brand=brand; c.model=model; c.year=year; c.color=color
-        c.mileage_km=mileage_km; c.price=price; c.quantity=quantity; c.status=status
-        db.commit()
+        with conn.cursor() as cur:
+            cur.execute(
+                f'SELECT 1 FROM "{SCHEMA_NAME}".cars WHERE id = %s',
+                (car_id,),
+            )
+            if not cur.fetchone():
+                raise HTTPException(404, "Car not found")
+
+            cur.execute(
+                f"""
+                UPDATE "{SCHEMA_NAME}".cars
+                SET brand=%s, model=%s, year=%s, color=%s,
+                    mileage_km=%s, price=%s, quantity=%s, status=%s
+                WHERE id=%s
+                """,
+                (brand, model, year, color, mileage_km, price, quantity, status, car_id),
+            )
+        conn.commit()
         return {"ok": True}
     finally:
-        db.close()
+        conn.close()
 
 @app.delete("/api/cars/{car_id}")
 def delete_car(car_id: int):
-    db = SessionLocal()
+    conn = get_conn()
     try:
-        c = db.query(Car).get(car_id)
-        if c:
-            db.delete(c); db.commit()
+        with conn.cursor() as cur:
+            cur.execute(
+                f'DELETE FROM "{SCHEMA_NAME}".cars WHERE id = %s',
+                (car_id,),
+            )
+        conn.commit()
         return {"ok": True}
     finally:
-        db.close()
+        conn.close()
 
 # ---------- API: Clients ----------
 @app.get("/api/clients")
 def list_clients(nome: Optional[str] = None, cpf: Optional[str] = None):
-    db = SessionLocal()
+    conn = get_conn()
     try:
-        q = db.query(Client)
-        if nome:
-            q = q.filter(Client.nome.ilike(f"%{nome}%"))
-        if cpf:
-            digits = "".join(ch for ch in cpf if ch.isdigit())
-            if digits:
-                q = q.filter(Client.cpf == digits)
-        rows = q.order_by(Client.id.desc()).all()
-        return [
-            dict(
-                id=r.id,
-                nome=r.nome,
-                cpf=r.cpf,
-                data_nascimento=r.data_nascimento.isoformat(),
+        with conn.cursor() as cur:
+            query = f'SELECT id, nome, cpf, data_nascimento FROM "{SCHEMA_NAME}".clients'
+            conditions = []
+            params = []
+            if nome:
+                conditions.append("nome ILIKE %s")
+                params.append(f"%{nome}%")
+            if cpf:
+                digits = "".join(ch for ch in cpf if ch.isdigit())
+                if digits:
+                    conditions.append("cpf = %s")
+                    params.append(digits)
+            if conditions:
+                query += " WHERE " + " AND ".join(conditions)
+            query += " ORDER BY id DESC"
+            cur.execute(query, tuple(params))
+            rows = cur.fetchall()
+        result = []
+        for r in rows:
+            dn = r[3]
+            result.append(
+                dict(
+                    id=r[0],
+                    nome=r[1],
+                    cpf=r[2],
+                    data_nascimento=dn.isoformat() if isinstance(dn, date) else str(dn),
+                )
             )
-            for r in rows
-        ]
+        return result
     finally:
-        db.close()
+        conn.close()
 
 @app.post("/api/clients")
 def create_client(
@@ -1055,20 +1331,32 @@ def create_client(
     cpf: str = Form(...),
     data_nascimento: str = Form(...),
 ):
-    db = SessionLocal()
+    conn = get_conn()
     try:
         cpf_digits = _cpf_digits_or_400(cpf)
         dn = _parse_date_or_400(data_nascimento)
 
-        exists = db.query(Client).filter(Client.cpf == cpf_digits).first()
-        if exists:
-            raise HTTPException(status_code=409, detail="CPF já cadastrado.")
+        with conn.cursor() as cur:
+            cur.execute(
+                f'SELECT id FROM "{SCHEMA_NAME}".clients WHERE cpf = %s',
+                (cpf_digits,),
+            )
+            if cur.fetchone():
+                raise HTTPException(status_code=409, detail="CPF já cadastrado.")
 
-        c = Client(nome=nome.strip(), cpf=cpf_digits, data_nascimento=dn)
-        db.add(c); db.commit(); db.refresh(c)
-        return {"id": c.id}
+            cur.execute(
+                f"""
+                INSERT INTO "{SCHEMA_NAME}".clients (nome, cpf, data_nascimento)
+                VALUES (%s, %s, %s)
+                RETURNING id
+                """,
+                (nome.strip(), cpf_digits, dn),
+            )
+            new_id = cur.fetchone()[0]
+        conn.commit()
+        return {"id": new_id}
     finally:
-        db.close()
+        conn.close()
 
 @app.put("/api/clients/{client_id}")
 def update_client(
@@ -1077,38 +1365,55 @@ def update_client(
     cpf: str = Form(...),
     data_nascimento: str = Form(...),
 ):
-    db = SessionLocal()
+    conn = get_conn()
     try:
-        c = db.query(Client).get(client_id)
-        if not c:
-            raise HTTPException(status_code=404, detail="Cliente não encontrado.")
-
         cpf_digits = _cpf_digits_or_400(cpf)
         dn = _parse_date_or_400(data_nascimento)
 
-        dup = db.query(Client).filter(Client.cpf == cpf_digits, Client.id != client_id).first()
-        if dup:
-            raise HTTPException(status_code=409, detail="CPF já cadastrado em outro cliente.")
+        with conn.cursor() as cur:
+            cur.execute(
+                f'SELECT id FROM "{SCHEMA_NAME}".clients WHERE id = %s',
+                (client_id,),
+            )
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="Cliente não encontrado.")
 
-        c.nome = nome.strip()
-        c.cpf = cpf_digits
-        c.data_nascimento = dn
+            cur.execute(
+                f"""
+                SELECT id FROM "{SCHEMA_NAME}".clients
+                WHERE cpf = %s AND id <> %s
+                """,
+                (cpf_digits, client_id),
+            )
+            if cur.fetchone():
+                raise HTTPException(status_code=409, detail="CPF já cadastrado em outro cliente.")
 
-        db.commit()
+            cur.execute(
+                f"""
+                UPDATE "{SCHEMA_NAME}".clients
+                SET nome = %s, cpf = %s, data_nascimento = %s
+                WHERE id = %s
+                """,
+                (nome.strip(), cpf_digits, dn, client_id),
+            )
+        conn.commit()
         return {"ok": True}
     finally:
-        db.close()
+        conn.close()
 
 @app.delete("/api/clients/{client_id}")
 def delete_client(client_id: int):
-    db = SessionLocal()
+    conn = get_conn()
     try:
-        c = db.query(Client).get(client_id)
-        if c:
-            db.delete(c); db.commit()
+        with conn.cursor() as cur:
+            cur.execute(
+                f'DELETE FROM "{SCHEMA_NAME}".clients WHERE id = %s',
+                (client_id,),
+            )
+        conn.commit()
         return {"ok": True}
     finally:
-        db.close()
+        conn.close()
 
 # ---------- API: Sellers ----------
 @app.get("/api/sellers")
@@ -1117,29 +1422,41 @@ def list_sellers(
     email: Optional[str] = None,
     cpf: Optional[str] = None,
 ):
-    db = SessionLocal()
+    conn = get_conn()
     try:
-        q = db.query(Seller)
-        if nome:
-            q = q.filter(Seller.nome.ilike(f"%{nome}%"))
-        if email:
-            q = q.filter(Seller.email.ilike(f"%{email}%"))
-        if cpf:
-            digits = "".join(ch for ch in cpf if ch.isdigit())
-            if digits:
-                q = q.filter(Seller.cpf == digits)
-        rows = q.order_by(Seller.id.desc()).all()
-        return [
-            dict(
-                id=r.id,
-                nome=r.nome,
-                email=r.email,
-                cpf=r.cpf,
+        with conn.cursor() as cur:
+            query = f'SELECT id, nome, email, cpf FROM "{SCHEMA_NAME}".sellers'
+            conditions = []
+            params = []
+            if nome:
+                conditions.append("nome ILIKE %s")
+                params.append(f"%{nome}%")
+            if email:
+                conditions.append("email ILIKE %s")
+                params.append(f"%{email}%")
+            if cpf:
+                digits = "".join(ch for ch in cpf if ch.isdigit())
+                if digits:
+                    conditions.append("cpf = %s")
+                    params.append(digits)
+            if conditions:
+                query += " WHERE " + " AND ".join(conditions)
+            query += " ORDER BY id DESC"
+            cur.execute(query, tuple(params))
+            rows = cur.fetchall()
+        result = []
+        for r in rows:
+            result.append(
+                dict(
+                    id=r[0],
+                    nome=r[1],
+                    email=r[2],
+                    cpf=r[3],
+                )
             )
-            for r in rows
-        ]
+        return result
     finally:
-        db.close()
+        conn.close()
 
 @app.post("/api/sellers")
 def create_seller(
@@ -1147,24 +1464,32 @@ def create_seller(
     email: str = Form(...),
     cpf: str = Form(...),
 ):
-    db = SessionLocal()
+    conn = get_conn()
     try:
         cpf_digits = _cpf_digits_or_400(cpf)
         email_norm = _email_or_400(email)
 
-        exists = db.query(Seller).filter(Seller.cpf == cpf_digits).first()
-        if exists:
-            raise HTTPException(status_code=409, detail="CPF já cadastrado para outro vendedor.")
+        with conn.cursor() as cur:
+            cur.execute(
+                f'SELECT id FROM "{SCHEMA_NAME}".sellers WHERE cpf = %s',
+                (cpf_digits,),
+            )
+            if cur.fetchone():
+                raise HTTPException(status_code=409, detail="CPF já cadastrado para outro vendedor.")
 
-        s = Seller(
-            nome=nome.strip(),
-            email=email_norm,
-            cpf=cpf_digits,
-        )
-        db.add(s); db.commit(); db.refresh(s)
-        return {"id": s.id}
+            cur.execute(
+                f"""
+                INSERT INTO "{SCHEMA_NAME}".sellers (nome, email, cpf)
+                VALUES (%s, %s, %s)
+                RETURNING id
+                """,
+                (nome.strip(), email_norm, cpf_digits),
+            )
+            new_id = cur.fetchone()[0]
+        conn.commit()
+        return {"id": new_id}
     finally:
-        db.close()
+        conn.close()
 
 @app.put("/api/sellers/{seller_id}")
 def update_seller(
@@ -1173,38 +1498,204 @@ def update_seller(
     email: str = Form(...),
     cpf: str = Form(...),
 ):
-    db = SessionLocal()
+    conn = get_conn()
     try:
-        s = db.query(Seller).get(seller_id)
-        if not s:
-            raise HTTPException(status_code=404, detail="Vendedor não encontrado.")
-
         cpf_digits = _cpf_digits_or_400(cpf)
         email_norm = _email_or_400(email)
 
-        dup = db.query(Seller).filter(Seller.cpf == cpf_digits, Seller.id != seller_id).first()
-        if dup:
-            raise HTTPException(status_code=409, detail="CPF já cadastrado em outro vendedor.")
+        with conn.cursor() as cur:
+            cur.execute(
+                f'SELECT id FROM "{SCHEMA_NAME}".sellers WHERE id = %s',
+                (seller_id,),
+            )
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="Vendedor não encontrado.")
 
-        s.nome = nome.strip()
-        s.email = email_norm
-        s.cpf = cpf_digits
+            cur.execute(
+                f"""
+                SELECT id FROM "{SCHEMA_NAME}".sellers
+                WHERE cpf = %s AND id <> %s
+                """,
+                (cpf_digits, seller_id),
+            )
+            if cur.fetchone():
+                raise HTTPException(status_code=409, detail="CPF já cadastrado em outro vendedor.")
 
-        db.commit()
+            cur.execute(
+                f"""
+                UPDATE "{SCHEMA_NAME}".sellers
+                SET nome = %s, email = %s, cpf = %s
+                WHERE id = %s
+                """,
+                (nome.strip(), email_norm, cpf_digits, seller_id),
+            )
+        conn.commit()
         return {"ok": True}
     finally:
-        db.close()
+        conn.close()
 
 @app.delete("/api/sellers/{seller_id}")
 def delete_seller(seller_id: int):
-    db = SessionLocal()
+    conn = get_conn()
     try:
-        s = db.query(Seller).get(seller_id)
-        if s:
-            db.delete(s); db.commit()
+        with conn.cursor() as cur:
+            cur.execute(
+                f'DELETE FROM "{SCHEMA_NAME}".sellers WHERE id = %s',
+                (seller_id,),
+            )
+        conn.commit()
         return {"ok": True}
     finally:
-        db.close()
+        conn.close()
+
+# ---------- API: Orders / Vendas ----------
+@app.get("/api/orders")
+def list_orders():
+    """
+    Lista pedidos com:
+    - id do carro, descrição e valor unitário;
+    - id/nome do vendedor;
+    - id/nome do cliente;
+    - quantidade, total e data.
+    """
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT
+                    o.id,                 -- 0 id do pedido
+                    car.id    AS car_id,  -- 1
+                    car.brand,            -- 2
+                    car.model,            -- 3
+                    car.price,            -- 4 valor unitário
+                    o.quantity,           -- 5
+                    o.total_value,        -- 6
+                    s.id      AS seller_id,   -- 7
+                    s.nome    AS seller_name, -- 8
+                    c.id      AS client_id,   -- 9
+                    c.nome    AS client_name, -- 10
+                    o.created_at          -- 11
+                FROM "{SCHEMA_NAME}".orders o
+                JOIN "{SCHEMA_NAME}".sellers s ON o.seller_id = s.id
+                JOIN "{SCHEMA_NAME}".clients c ON o.client_id = c.id
+                JOIN "{SCHEMA_NAME}".cars   car ON o.car_id   = car.id
+                ORDER BY o.id DESC
+                """
+            )
+            rows = cur.fetchall()
+        result = []
+        for r in rows:
+            dt = r[11]
+            result.append(
+                dict(
+                    id=r[0],
+                    car_id=r[1],
+                    car_description=f"{r[2]} {r[3]}",
+                    car_price=float(r[4]),
+                    quantity=r[5],
+                    total_value=float(r[6]),
+                    seller_id=r[7],
+                    seller=r[8],
+                    client_id=r[9],
+                    client=r[10],
+                    created_at=dt.strftime("%Y-%m-%d %H:%M:%S") if isinstance(dt, datetime) else str(dt),
+                )
+            )
+        return result
+    finally:
+        conn.close()
+
+@app.post("/api/orders")
+def create_order(
+    seller_id: int = Form(...),
+    client_id: int = Form(...),
+    car_id: int = Form(...),
+    quantity: int = Form(...),
+):
+    """
+    Cria um pedido:
+    - valida vendedor, cliente e carro;
+    - verifica estoque;
+    - calcula valor total;
+    - diminui o quantity do carro;
+    """
+    if quantity <= 0:
+        raise HTTPException(status_code=400, detail="Quantidade deve ser positiva.")
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            # Vendedor
+            cur.execute(
+                f'SELECT id FROM "{SCHEMA_NAME}".sellers WHERE id = %s',
+                (seller_id,),
+            )
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="Vendedor não encontrado.")
+
+            # Cliente
+            cur.execute(
+                f'SELECT id FROM "{SCHEMA_NAME}".clients WHERE id = %s',
+                (client_id,),
+            )
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="Cliente não encontrado.")
+
+            # Carro + estoque + preço
+            cur.execute(
+                f"""
+                SELECT id, quantity, price
+                FROM "{SCHEMA_NAME}".cars
+                WHERE id = %s
+                """,
+                (car_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Carro não encontrado.")
+
+            car_quantity = row[1] if row[1] is not None else 0
+            car_price = float(row[2])
+
+            if car_quantity < quantity:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Estoque insuficiente para o carro selecionado. Disponível: {car_quantity}",
+                )
+
+            total_value = car_price * quantity
+
+            # Inserir pedido
+            cur.execute(
+                f"""
+                INSERT INTO "{SCHEMA_NAME}".orders
+                    (seller_id, client_id, car_id, quantity, total_value)
+                VALUES (%s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (seller_id, client_id, car_id, quantity, total_value),
+            )
+            new_id = cur.fetchone()[0]
+
+            # Atualizar estoque
+            cur.execute(
+                f"""
+                UPDATE "{SCHEMA_NAME}".cars
+                SET quantity = quantity - %s
+                WHERE id = %s
+                """,
+                (quantity, car_id),
+            )
+
+        conn.commit()
+        return {
+            "id": new_id,
+            "total_value": total_value,
+            "remaining_stock": car_quantity - quantity,
+        }
+    finally:
+        conn.close()
 
 # ---------- Main ----------
 if __name__ == "__main__":
